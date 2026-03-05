@@ -255,6 +255,124 @@ final class StaticXCFrameworkModuleMapGraphMapperTests: TuistUnitTestCase {
         XCTAssertEmpty(gotSideEffects)
     }
 
+    // MARK: - Bug reproduction: device vs simulator slice selection (tuist/tuist#9723)
+
+    func test_map_when_static_xcframework_framework_with_both_device_and_simulator_slices_linked_via_dynamic_xcframework(
+    ) async throws {
+        // Given
+        // An xcframework with both device (ios-arm64) and simulator (ios-arm64-simulator) slices.
+        // The mapper's .first(where:) on L76-77 only matches by platform, so it always picks the
+        // first library (device slice), producing FRAMEWORK_SEARCH_PATHS that point to
+        // ios-arm64 instead of ios-arm64-simulator. This causes:
+        //   ld: building for 'iOS-simulator', but linking in object file built for 'iOS'
+        let projectPath = try temporaryPath()
+            .appending(component: "Project")
+        given(manifestFilesLocator)
+            .locatePackageManifest(at: .any)
+            .willReturn(
+                projectPath.appending(components: Constants.tuistDirectoryName, Constants.SwiftPackageManager.packageSwiftName)
+            )
+        let googleMapsPath = projectPath
+            .parentDirectory
+            .appending(component: "GoogleMaps.xcframework")
+
+        // Create headers for both slices
+        let deviceHeadersPath = googleMapsPath.appending(components: "ios-arm64", "Headers")
+        try await fileSystem.makeDirectory(at: deviceHeadersPath)
+        try await fileSystem.writeText(
+            "modulemap",
+            at: deviceHeadersPath.appending(component: "module.modulemap")
+        )
+
+        let simulatorHeadersPath = googleMapsPath.appending(components: "ios-arm64-simulator", "Headers")
+        try await fileSystem.makeDirectory(at: simulatorHeadersPath)
+        try await fileSystem.writeText(
+            "modulemap",
+            at: simulatorHeadersPath.appending(component: "module.modulemap")
+        )
+
+        let infoPlist: XCFrameworkInfoPlist = .test(
+            libraries: [
+                .test(
+                    identifier: "ios-arm64",
+                    path: try RelativePath(validating: "GoogleMaps.framework/GoogleMaps"),
+                    platform: .iOS,
+                    architectures: [.arm64]
+                ),
+                .test(
+                    identifier: "ios-arm64-simulator",
+                    path: try RelativePath(validating: "GoogleMaps.framework/GoogleMaps"),
+                    platform: .iOS,
+                    architectures: [.arm64]
+                ),
+            ]
+        )
+
+        let graph: Graph = .test(
+            name: "App",
+            path: projectPath,
+            projects: [
+                projectPath: .test(
+                    path: projectPath,
+                    targets: [
+                        .test(
+                            name: "App"
+                        ),
+                    ]
+                ),
+            ],
+            dependencies: [
+                .target(name: "App", path: projectPath): [
+                    .testXCFramework(
+                        path: try temporaryPath()
+                            .appending(component: "DynamicFramework.xcframework")
+                    ),
+                ],
+                .testXCFramework(
+                    path: try temporaryPath()
+                        .appending(component: "DynamicFramework.xcframework")
+                ): [
+                    .testXCFramework(
+                        path: googleMapsPath,
+                        infoPlist: infoPlist,
+                        linking: .static,
+                        moduleMaps: []
+                    ),
+                ],
+            ]
+        )
+
+        // When
+        let (gotGraph, _, _) = try await subject.map(graph: graph, environment: MapperEnvironment())
+
+        // Then
+        // The FRAMEWORK_SEARCH_PATHS must include the simulator slice path so that
+        // simulator builds can find the correct binary.
+        // With the current bug, only "ios-arm64" (device) is included.
+        let appTarget = try XCTUnwrap(gotGraph.projects[projectPath]?.targets["App"])
+        let frameworkSearchPaths = appTarget.settings?.base["FRAMEWORK_SEARCH_PATHS"]
+
+        switch frameworkSearchPaths {
+        case let .array(paths):
+            let hasSimulatorPath = paths.contains { $0.contains("ios-arm64-simulator") }
+            XCTAssertTrue(
+                hasSimulatorPath,
+                "FRAMEWORK_SEARCH_PATHS should include the simulator slice path (ios-arm64-simulator), "
+                    + "but only contains: \(paths). "
+                    + "This is the bug described in tuist/tuist#9723 — .first(where:) picks the device slice."
+            )
+        case let .string(path):
+            XCTAssertTrue(
+                path.contains("ios-arm64-simulator"),
+                "FRAMEWORK_SEARCH_PATHS should include the simulator slice path, but got: \(path)"
+            )
+        case .none:
+            XCTFail(
+                "FRAMEWORK_SEARCH_PATHS is nil — the mapper did not generate search paths for the static xcframework"
+            )
+        }
+    }
+
     func test_map_when_static_xcframework_without_umbrella_header_linked_via_dynamic_xcframework() async throws {
         // Given
         let projectPath = try temporaryPath()
