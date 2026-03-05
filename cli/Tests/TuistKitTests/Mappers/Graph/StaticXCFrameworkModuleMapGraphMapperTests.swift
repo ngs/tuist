@@ -257,7 +257,8 @@ final class StaticXCFrameworkModuleMapGraphMapperTests: TuistUnitTestCase {
 
     // MARK: - Bug reproduction: device vs simulator slice selection (tuist/tuist#9723)
 
-    func test_map_when_static_xcframework_framework_with_both_device_and_simulator_slices_linked_via_dynamic_xcframework() async throws {
+    func test_map_when_static_xcframework_framework_with_both_device_and_simulator_slices_linked_via_dynamic_xcframework(
+    ) async throws {
         // Given
         // An xcframework with both device (ios-arm64) and simulator (ios-arm64-simulator) slices.
         // The mapper's .first(where:) on L76-77 only matches by platform, so it always picks the
